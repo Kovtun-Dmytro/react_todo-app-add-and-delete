@@ -1,6 +1,7 @@
 /* eslint-disable max-len */
 /* eslint-disable jsx-a11y/control-has-associated-label */
 import React, { useEffect, useRef, useState } from 'react';
+import classNames from 'classnames';
 import { UserWarning } from './UserWarning';
 
 const USER_ID = 3513;
@@ -18,9 +19,8 @@ export const App: React.FC = () => {
   const [todos, setTodos] = useState<Todo[]>([]);
   const [tempTodo, setTempTodo] = useState<Todo | null>(null);
   const [newTitle, setNewTitle] = useState('');
-  const [error, setError] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [processingIds, setProcessingIds] = useState<Set<number>>(new Set());
+  const [error, setError] = useState<string>('');
+  const [loadingTodoId, setLoadingTodoId] = useState<number | null>(null);
   const [filter, setFilter] = useState<Filter>('all');
 
   const inputRef = useRef<HTMLInputElement>(null);
@@ -29,7 +29,7 @@ export const App: React.FC = () => {
     let timer: NodeJS.Timeout;
 
     if (error) {
-      timer = setTimeout(() => setError(null), 3000);
+      timer = setTimeout(() => setError(''), 3000);
     }
 
     return () => {
@@ -47,7 +47,7 @@ export const App: React.FC = () => {
     fetch(`https://mate.academy/students-api/todos?userId=${USER_ID}`)
       .then(res => {
         if (!res.ok) {
-          throw new Error('Unable to load todos');
+          throw new Error();
         }
 
         return res.json();
@@ -67,26 +67,19 @@ export const App: React.FC = () => {
       return;
     }
 
-    setIsLoading(true);
-
-    const temp: Todo = {
-      id: 0,
-      userId: USER_ID,
-      title,
-      completed: false,
-    };
+    const temp: Todo = { id: 0, userId: USER_ID, title, completed: false };
 
     setTempTodo(temp);
-    setError(null);
+    setLoadingTodoId(0);
+
+    if (inputRef.current) {
+      inputRef.current.disabled = true;
+    }
 
     try {
       const response = await fetch('https://mate.academy/students-api/todos', {
         method: 'POST',
-        body: JSON.stringify({
-          title,
-          userId: USER_ID,
-          completed: false,
-        }),
+        body: JSON.stringify({ title, userId: USER_ID, completed: false }),
         headers: { 'Content-type': 'application/json; charset=UTF-8' },
       });
 
@@ -102,57 +95,38 @@ export const App: React.FC = () => {
       setError('Unable to add a todo');
     } finally {
       setTempTodo(null);
-      setIsLoading(false);
-      inputRef.current?.focus();
+      setLoadingTodoId(null);
+
+      if (inputRef.current) {
+        inputRef.current.disabled = false;
+        inputRef.current.focus();
+      }
     }
   };
 
   const handleDelete = async (todoId: number) => {
-    setProcessingIds(prev => {
-      const next = new Set(prev);
-
-      next.add(todoId);
-
-      return next;
-    });
-
+    setLoadingTodoId(todoId);
     try {
-      const response = await fetch(
+      const res = await fetch(
         `https://mate.academy/students-api/todos/${todoId}`,
         { method: 'DELETE' },
       );
 
-      if (!response.ok) {
+      if (!res.ok) {
         throw new Error();
       }
 
       setTodos(prev => prev.filter(t => t.id !== todoId));
     } catch {
       setError('Unable to delete a todo');
-      setProcessingIds(prev => {
-        const next = new Set(prev);
-
-        next.delete(todoId);
-
-        return next;
-      });
     } finally {
+      setLoadingTodoId(null);
       inputRef.current?.focus();
     }
   };
 
   const handleClearCompleted = async () => {
     const completed = todos.filter(t => t.completed);
-    const ids = completed.map(t => t.id);
-
-    setProcessingIds(prev => {
-      const next = new Set(prev);
-
-      ids.forEach(id => next.add(id));
-
-      return next;
-    });
-
     const results = await Promise.allSettled(
       completed.map(t =>
         fetch(`https://mate.academy/students-api/todos/${t.id}`, {
@@ -167,19 +141,63 @@ export const App: React.FC = () => {
       ),
     );
 
-    const failedIds = ids.filter((_, i) => results[i].status === 'rejected');
-
-    if (failedIds.length) {
+    if (results.some(r => r.status === 'rejected')) {
       setError('Unable to delete a todo');
-      setProcessingIds(prev => {
-        const next = new Set(prev);
+    }
+  };
 
-        failedIds.forEach(id => next.delete(id));
+  const handleToggleStatus = async (todo: Todo) => {
+    setLoadingTodoId(todo.id);
+    try {
+      const response = await fetch(
+        `https://mate.academy/students-api/todos/${todo.id}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({ completed: !todo.completed }),
+          headers: { 'Content-type': 'application/json; charset=UTF-8' },
+        },
+      );
 
-        return next;
-      });
-    } else {
-      inputRef.current?.focus();
+      if (!response.ok) {
+        throw new Error();
+      }
+
+      const updated: Todo = await response.json();
+
+      setTodos(prev => prev.map(t => (t.id === updated.id ? updated : t)));
+    } catch {
+      setError('Unable to update a todo');
+    } finally {
+      setLoadingTodoId(null);
+    }
+  };
+
+  const handleToggleAll = async () => {
+    const shouldComplete = !todos.every(t => t.completed);
+
+    try {
+      const results = await Promise.allSettled(
+        todos.map(todo =>
+          fetch(`https://mate.academy/students-api/todos/${todo.id}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ completed: shouldComplete }),
+            headers: { 'Content-type': 'application/json; charset=UTF-8' },
+          }).then(res => {
+            if (!res.ok) {
+              throw new Error();
+            }
+
+            return res.json();
+          }),
+        ),
+      );
+      const updated = results
+        .filter(r => r.status === 'fulfilled')
+        .map(r => (r as PromiseFulfilledResult<Todo>).value);
+
+      setTodos(prev => prev.map(t => updated.find(u => u.id === t.id) || t));
+    } catch {
+      setError('Unable to update todos');
     }
   };
 
@@ -204,88 +222,111 @@ export const App: React.FC = () => {
         todos
       </h1>
 
-      <form onSubmit={handleSubmit}>
-        <input
-          ref={inputRef}
-          autoFocus
-          type="text"
-          className="todoapp__new-todo"
-          placeholder="What needs to be done?"
-          value={newTitle}
-          onChange={e => setNewTitle(e.target.value)}
-          disabled={isLoading}
-          data-cy="NewTodoField"
+      <header className="todoapp__header">
+        <button
+          type="button"
+          className={classNames('todoapp__toggle-all', {
+            active: todos.length > 0 && todos.every(t => t.completed),
+          })}
+          data-cy="ToggleAllButton"
+          onClick={handleToggleAll}
         />
-      </form>
+        <form onSubmit={handleSubmit}>
+          <input
+            ref={inputRef}
+            autoFocus
+            type="text"
+            className="todoapp__new-todo"
+            placeholder="What needs to be done?"
+            value={newTitle}
+            onChange={e => setNewTitle(e.target.value)}
+            disabled={loadingTodoId !== null}
+            data-cy="NewTodoField"
+          />
+        </form>
+      </header>
 
       <div
         data-cy="ErrorNotification"
-        className={`notification is-danger ${error ? '' : 'hidden'}`}
+        className={classNames(
+          'notification',
+          'is-danger',
+          'is-light',
+          'has-text-weight-normal',
+          { hidden: !error },
+        )}
       >
-        {error}
         <button
           type="button"
           className="delete"
           data-cy="HideErrorButton"
-          onClick={() => setError(null)}
+          onClick={() => setError('')}
         />
+        {error}
       </div>
 
       <ul className="todoapp__list" data-cy="TodoList">
-        {visibleTodos.map(todo => {
-          const isProcessing = processingIds.has(todo.id);
-
-          return (
-            <li
-              key={todo.id}
-              className={`todo ${todo.completed ? 'completed' : ''}`}
-              data-cy="Todo"
-            >
+        {visibleTodos.map(todo => (
+          <li
+            key={todo.id}
+            className={classNames('todo', { completed: todo.completed })}
+            data-cy="Todo"
+          >
+            <label className="todo__status-label">
               <input
                 type="checkbox"
                 className="todo__status"
                 data-cy="TodoStatus"
                 checked={todo.completed}
-                readOnly
+                onChange={() => handleToggleStatus(todo)}
+                aria-label="Toggle todo status"
               />
-              <span data-cy="TodoTitle">{todo.title}</span>
+            </label>
 
-              <span
-                className={`loader ${isProcessing ? 'is-active' : ''}`}
-                data-cy="TodoLoader"
-              />
+            <span data-cy="TodoTitle" className="todo__title">
+              {todo.title}
+            </span>
 
-              <button
-                type="button"
-                className="todo__remove"
-                data-cy="TodoDelete"
-                onClick={() => handleDelete(todo.id)}
-                disabled={isProcessing}
-              >
-                ×
-              </button>
-            </li>
-          );
-        })}
+            <button
+              type="button"
+              className="todo__remove"
+              data-cy="TodoDelete"
+              onClick={() => handleDelete(todo.id)}
+            >
+              ×
+            </button>
+
+            <div
+              data-cy="TodoLoader"
+              className={classNames('modal overlay', {
+                'is-active': loadingTodoId === todo.id,
+              })}
+            >
+              <div className="modal-background has-background-white-ter" />
+              <div className="loader" />
+            </div>
+          </li>
+        ))}
 
         {tempTodo && (
           <li
-            className={`todo ${tempTodo.completed ? 'completed' : ''}`}
+            className={classNames('todo', { completed: tempTodo.completed })}
             data-cy="Todo"
           >
-            <input
-              type="checkbox"
-              className="todo__status"
-              data-cy="TodoStatus"
-              checked={tempTodo.completed}
-              readOnly
-            />
-            <span data-cy="TodoTitle">{tempTodo.title}</span>
+            <label className="todo__status-label">
+              <input
+                type="checkbox"
+                className="todo__status"
+                data-cy="TodoStatus"
+                checked={tempTodo.completed}
+                readOnly
+                aria-label="Temporary todo status"
+              />
+            </label>
 
-            <span
-              className={`loader ${isLoading ? 'is-active' : ''}`}
-              data-cy="TodoLoader"
-            />
+            <span data-cy="TodoTitle" className="todo__title">
+              Todo is being saved now
+            </span>
 
             <button
               type="button"
@@ -295,6 +336,16 @@ export const App: React.FC = () => {
             >
               ×
             </button>
+
+            <div
+              data-cy="TodoLoader"
+              className={classNames('modal overlay', {
+                'is-active': loadingTodoId === 0,
+              })}
+            >
+              <div className="modal-background has-background-white-ter" />
+              <div className="loader" />
+            </div>
           </li>
         )}
       </ul>
@@ -302,13 +353,18 @@ export const App: React.FC = () => {
       {todos.length > 0 && (
         <footer className="todoapp__footer" data-cy="Footer">
           <span data-cy="TodosCounter">
-            {todos.filter(t => !t.completed).length} items left
+            {todos.filter(t => !t.completed).length}{' '}
+            {todos.filter(t => !t.completed).length === 1
+              ? 'item left'
+              : 'items left'}
           </span>
 
           <nav className="filter" data-cy="Filter">
             <a
               href="#/"
-              className={`filter__link ${filter === 'all' ? 'selected' : ''}`}
+              className={classNames('filter__link', {
+                selected: filter === 'all',
+              })}
               data-cy="FilterLinkAll"
               onClick={() => setFilter('all')}
             >
@@ -316,9 +372,9 @@ export const App: React.FC = () => {
             </a>
             <a
               href="#/active"
-              className={`filter__link ${
-                filter === 'active' ? 'selected' : ''
-              }`}
+              className={classNames('filter__link', {
+                selected: filter === 'active',
+              })}
               data-cy="FilterLinkActive"
               onClick={() => setFilter('active')}
             >
@@ -326,9 +382,9 @@ export const App: React.FC = () => {
             </a>
             <a
               href="#/completed"
-              className={`filter__link ${
-                filter === 'completed' ? 'selected' : ''
-              }`}
+              className={classNames('filter__link', {
+                selected: filter === 'completed',
+              })}
               data-cy="FilterLinkCompleted"
               onClick={() => setFilter('completed')}
             >
