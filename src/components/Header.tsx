@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { RefObject } from 'react';
 import classNames from 'classnames';
 
 interface Props {
@@ -9,6 +9,7 @@ interface Props {
   loading: boolean;
   todosCount: number;
   allCompleted: boolean;
+  inputRef: RefObject<HTMLInputElement>;
 }
 
 export const Header: React.FC<Props> = ({
@@ -19,9 +20,8 @@ export const Header: React.FC<Props> = ({
   loading,
   todosCount,
   allCompleted,
+  inputRef,
 }) => {
-  const inputRef = useRef<HTMLInputElement>(null);
-
   return (
     <header className="todoapp__header">
       <button

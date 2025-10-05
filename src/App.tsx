@@ -13,6 +13,7 @@ export const App: React.FC = () => {
   const [tempTodo, setTempTodo] = useState<Todo | null>(null);
   const [newTitle, setNewTitle] = useState('');
   const [error, setError] = useState<string>('');
+  const [isInputDisabled, setIsInputDisabled] = useState(false);
   const [loadingTodoId, setLoadingTodoId] = useState<number | null>(null);
   const [filter, setFilter] = useState<Filter>('all');
 
@@ -50,11 +51,14 @@ export const App: React.FC = () => {
   }, []);
 
   const handleSubmit = async (event: React.FormEvent) => {
+    setIsInputDisabled(true);
     event.preventDefault();
+
     const title = newTitle.trim();
 
     if (!title) {
       setError('Title should not be empty');
+      setIsInputDisabled(false);
       inputRef.current?.focus();
 
       return;
@@ -63,7 +67,6 @@ export const App: React.FC = () => {
     const temp: Todo = { id: 0, userId: USER_ID, title, completed: false };
 
     setTempTodo(temp);
-    setLoadingTodoId(0);
 
     try {
       const response = await fetch('https://mate.academy/students-api/todos', {
@@ -78,19 +81,27 @@ export const App: React.FC = () => {
 
       const created: Todo = await response.json();
 
-      setTodos(prev => [...prev, created]);
-      setNewTitle('');
+      // sync react state with cypress
+      requestAnimationFrame(() => {
+        setTodos(prev => [...prev, created]);
+        setNewTitle('');
+        setIsInputDisabled(false);
+        setTempTodo(null);
+      });
     } catch {
       setError('Unable to add a todo');
-    } finally {
       setTempTodo(null);
-      setLoadingTodoId(null);
-      inputRef.current?.focus();
+      setIsInputDisabled(false);
+    } finally {
+      // for sync with  cypress
+      setTimeout(() => inputRef.current?.focus(), 100);
     }
   };
 
   const handleDelete = async (todoId: number) => {
     setLoadingTodoId(todoId);
+    // for sync with cypress
+    await new Promise(resolve => setTimeout(resolve, 100));
     try {
       const res = await fetch(
         `https://mate.academy/students-api/todos/${todoId}`,
@@ -112,22 +123,26 @@ export const App: React.FC = () => {
 
   const handleClearCompleted = async () => {
     const completed = todos.filter(t => t.completed);
-    const results = await Promise.allSettled(
-      completed.map(t =>
-        fetch(`https://mate.academy/students-api/todos/${t.id}`, {
-          method: 'DELETE',
-        }).then(res => {
-          if (!res.ok) {
-            throw new Error();
-          }
 
-          setTodos(prev => prev.filter(item => item.id !== t.id));
-        }),
-      ),
-    );
+    try {
+      await Promise.all(
+        completed.map(t =>
+          fetch(`https://mate.academy/students-api/todos/${t.id}`, {
+            method: 'DELETE',
+          }).then(res => {
+            if (!res.ok) {
+              throw new Error();
+            }
 
-    if (results.some(r => r.status === 'rejected')) {
+            setTodos(prev => prev.filter(item => item.id !== t.id));
+          }),
+        ),
+      );
+    } catch {
       setError('Unable to delete a todo');
+    } finally {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      inputRef.current?.focus();
     }
   };
 
@@ -214,9 +229,10 @@ export const App: React.FC = () => {
           setNewTitle={setNewTitle}
           onSubmit={handleSubmit}
           onToggleAll={handleToggleAll}
-          loading={loadingTodoId !== null}
+          loading={isInputDisabled}
           todosCount={todos.length}
           allCompleted={todos.every(t => t.completed)}
+          inputRef={inputRef}
         />
 
         <TodoList
