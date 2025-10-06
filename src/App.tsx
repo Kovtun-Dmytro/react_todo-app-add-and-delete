@@ -5,6 +5,8 @@ import { Footer } from './components/Footer';
 import { ErrorNotification } from './components/ErrorNotification';
 import { UserWarning } from './UserWarning';
 import { Todo, Filter } from './types/Todo';
+import { getTodos, createTodo, deleteTodo, updateTodo } from './api';
+import { ErrorType } from './types/ErrorType';
 
 const USER_ID = 3513;
 
@@ -20,17 +22,13 @@ export const App: React.FC = () => {
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    let timer: NodeJS.Timeout;
-
-    if (error) {
-      timer = setTimeout(() => setError(''), 3000);
+    if (!error) {
+      return;
     }
 
-    return () => {
-      if (timer) {
-        clearTimeout(timer);
-      }
-    };
+    const timer = setTimeout(() => setError(''), 3000);
+
+    return () => clearTimeout(timer);
   }, [error]);
 
   useEffect(() => {
@@ -38,16 +36,9 @@ export const App: React.FC = () => {
       return;
     }
 
-    fetch(`https://mate.academy/students-api/todos?userId=${USER_ID}`)
-      .then(res => {
-        if (!res.ok) {
-          throw new Error();
-        }
-
-        return res.json();
-      })
-      .then((data: Todo[]) => setTodos(data))
-      .catch(() => setError('Unable to load todos'));
+    getTodos(USER_ID)
+      .then(setTodos)
+      .catch(() => setError(ErrorType.LOAD_TODOS));
   }, []);
 
   const handleSubmit = async (event: React.FormEvent) => {
@@ -57,7 +48,7 @@ export const App: React.FC = () => {
     const title = newTitle.trim();
 
     if (!title) {
-      setError('Title should not be empty');
+      setError(ErrorType.EMPTY_TITLE);
       setIsInputDisabled(false);
       inputRef.current?.focus();
 
@@ -69,17 +60,7 @@ export const App: React.FC = () => {
     setTempTodo(temp);
 
     try {
-      const response = await fetch('https://mate.academy/students-api/todos', {
-        method: 'POST',
-        body: JSON.stringify({ title, userId: USER_ID, completed: false }),
-        headers: { 'Content-type': 'application/json; charset=UTF-8' },
-      });
-
-      if (!response.ok) {
-        throw new Error();
-      }
-
-      const created: Todo = await response.json();
+      const created = await createTodo(title, USER_ID);
 
       // sync react state with cypress
       requestAnimationFrame(() => {
@@ -89,7 +70,7 @@ export const App: React.FC = () => {
         setTempTodo(null);
       });
     } catch {
-      setError('Unable to add a todo');
+      setError(ErrorType.ADD_TODO);
       setTempTodo(null);
       setIsInputDisabled(false);
     } finally {
@@ -103,18 +84,10 @@ export const App: React.FC = () => {
     // for sync with cypress
     await new Promise(resolve => setTimeout(resolve, 100));
     try {
-      const res = await fetch(
-        `https://mate.academy/students-api/todos/${todoId}`,
-        { method: 'DELETE' },
-      );
-
-      if (!res.ok) {
-        throw new Error();
-      }
-
+      await deleteTodo(todoId);
       setTodos(prev => prev.filter(t => t.id !== todoId));
     } catch {
-      setError('Unable to delete a todo');
+      setError(ErrorType.DELETE_TODO);
     } finally {
       setLoadingTodoId(null);
       inputRef.current?.focus();
@@ -125,21 +98,24 @@ export const App: React.FC = () => {
     const completed = todos.filter(t => t.completed);
 
     try {
-      await Promise.all(
-        completed.map(t =>
-          fetch(`https://mate.academy/students-api/todos/${t.id}`, {
-            method: 'DELETE',
-          }).then(res => {
-            if (!res.ok) {
-              throw new Error();
-            }
-
-            setTodos(prev => prev.filter(item => item.id !== t.id));
-          }),
-        ),
+      const results = await Promise.allSettled(
+        completed.map(todo => deleteTodo(todo.id)),
       );
+
+      const fulfilled = results
+        .map((r, i) => ({ result: r, todo: completed[i] }))
+        .filter(r => r.result.status === 'fulfilled')
+        .map(r => r.todo.id);
+
+      const rejected = results.filter(r => r.status === 'rejected');
+
+      if (rejected.length > 0) {
+        setError(ErrorType.DELETE_TODO);
+      }
+
+      setTodos(prev => prev.filter(t => !fulfilled.includes(t.id)));
     } catch {
-      setError('Unable to delete a todo');
+      setError(ErrorType.DELETE_TODO);
     } finally {
       await new Promise(resolve => setTimeout(resolve, 50));
       inputRef.current?.focus();
@@ -149,24 +125,11 @@ export const App: React.FC = () => {
   const handleToggleStatus = async (todo: Todo) => {
     setLoadingTodoId(todo.id);
     try {
-      const response = await fetch(
-        `https://mate.academy/students-api/todos/${todo.id}`,
-        {
-          method: 'PATCH',
-          body: JSON.stringify({ completed: !todo.completed }),
-          headers: { 'Content-type': 'application/json; charset=UTF-8' },
-        },
-      );
-
-      if (!response.ok) {
-        throw new Error();
-      }
-
-      const updated: Todo = await response.json();
+      const updated = await updateTodo(todo.id, { completed: !todo.completed });
 
       setTodos(prev => prev.map(t => (t.id === updated.id ? updated : t)));
     } catch {
-      setError('Unable to update a todo');
+      setError(ErrorType.UPDATE_TODO);
     } finally {
       setLoadingTodoId(null);
     }
@@ -177,28 +140,18 @@ export const App: React.FC = () => {
 
     try {
       const results = await Promise.allSettled(
-        todos.map(todo =>
-          fetch(`https://mate.academy/students-api/todos/${todo.id}`, {
-            method: 'PATCH',
-            body: JSON.stringify({ completed: shouldComplete }),
-            headers: { 'Content-type': 'application/json; charset=UTF-8' },
-          }).then(res => {
-            if (!res.ok) {
-              throw new Error();
-            }
-
-            return res.json();
-          }),
-        ),
+        todos.map(t => updateTodo(t.id, { completed: shouldComplete })),
       );
 
-      const updated = results
-        .filter(r => r.status === 'fulfilled')
-        .map(r => (r as PromiseFulfilledResult<Todo>).value);
+      const fulfilled = results.filter(
+        r => r.status === 'fulfilled',
+      ) as PromiseFulfilledResult<Todo>[];
+
+      const updated = fulfilled.map(r => r.value);
 
       setTodos(prev => prev.map(t => updated.find(u => u.id === t.id) || t));
     } catch {
-      setError('Unable to update todos');
+      setError(ErrorType.UPDATE_TODOS);
     }
   };
 
